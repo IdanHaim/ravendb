@@ -426,6 +426,8 @@ namespace Raven.Database.Prefetching
 		{
 			foreach (var docToRemove in documentsToRemove)
 			{
+				if (docToRemove.Value == null)
+					continue;
 				if (docToRemove.Value.All(etag => lastIndexedEtag.CompareTo(etag) > 0) == false)
 					continue;
 
@@ -441,12 +443,6 @@ namespace Raven.Database.Prefetching
 			finally
 			{
 				updatedDocumentsLock.ExitWriteLock();
-			}
-
-			JsonDocument result;
-			while (prefetchingQueue.TryPeek(out result) && lastIndexedEtag.CompareTo(result.Etag) >= 0)
-			{
-				prefetchingQueue.TryDequeue(out result);
 			}
 		}
 
