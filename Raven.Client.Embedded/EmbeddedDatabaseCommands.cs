@@ -120,7 +120,21 @@ namespace Raven.Client.Embedded
 			// this
 
 			var documentsWithIdStartingWith = database.GetDocumentsWithIdStartingWith(keyPrefix, matches, exclude, start, pageSize, CancellationToken.None);
-			return SerializationHelper.RavenJObjectsToJsonDocuments(documentsWithIdStartingWith.OfType<RavenJObject>()).ToArray();
+
+            var docResults = documentsWithIdStartingWith.OfType<RavenJObject>().ToList();
+            var startsWithResults = SerializationHelper.RavenJObjectsToJsonDocuments(docResults.Select(x => (RavenJObject)x.CloneToken())).ToArray();
+
+            return RetryOperationBecauseOfConflict(docResults, startsWithResults, () =>
+                                                    StartsWith(keyPrefix, matches, start, pageSize, metadataOnly, exclude),
+                                                    conflictedResultId =>
+                                                    new ConflictException(
+                                                        "Conflict detected on " +
+                                                        conflictedResultId.Substring(0,
+                                                            conflictedResultId.IndexOf("/conflicts/", StringComparison.InvariantCulture)) +
+                                                        ", conflict must be resolved before the document will be accessible", true)
+                                                    {
+                                                        ConflictedVersionIds = new[] { conflictedResultId }
+                                                    }, retryAfterFirstResolve: true);
 		}
 
 		/// <summary>
@@ -516,7 +530,7 @@ namespace Raven.Client.Embedded
 													   ", conflict must be resolved before the document will be accessible", true)
 												   {
 													   ConflictedVersionIds = new[] { conflictedResultId }
-												   });
+												   }, isQuery: true);
 		}
 
 		/// <summary>
@@ -1212,16 +1226,24 @@ namespace Raven.Client.Embedded
 		}
 
 		private T RetryOperationBecauseOfConflict<T>(IEnumerable<RavenJObject> docResults, T currentResult, Func<T> nextTry,
-													Func<string, ConflictException> onConflictedQueryResult = null)
+            Func<string, ConflictException> onConflictedQueryResult = null, bool isQuery = false, bool retryAfterFirstResolve = false)
 		{
-			bool requiresRetry = docResults.Aggregate(false, (current, docResult) =>
-														current | AssertNonConflictedDocumentAndCheckIfNeedToReload(docResult, onConflictedQueryResult));
+            var requiresRetry = false;
+            foreach (var docResult in docResults)
+            {
+                requiresRetry |= AssertNonConflictedDocumentAndCheckIfNeedToReload(docResult, onConflictedQueryResult, isQuery);
+
+                if (retryAfterFirstResolve && requiresRetry)
+                    return nextTry();
+            }
+
 			if (!requiresRetry)
 				return currentResult;
 
 			if (resolvingConflictRetries)
 				throw new InvalidOperationException(
 					"Encountered another conflict after already resolving a conflict. Conflict resultion cannot recurse.");
+
 			resolvingConflictRetries = true;
 			try
 			{
@@ -1301,7 +1323,8 @@ namespace Raven.Client.Embedded
 			return false;
 		}
 
-		private bool AssertNonConflictedDocumentAndCheckIfNeedToReload(RavenJObject docResult, Func<string, ConflictException> onConflictedQueryResult = null)
+		private bool AssertNonConflictedDocumentAndCheckIfNeedToReload(RavenJObject docResult,
+            Func<string, ConflictException> onConflictedQueryResult = null, bool isQuery = false)
 		{
 			if (docResult == null)
 				return false;
@@ -1316,6 +1339,17 @@ namespace Raven.Client.Embedded
 					return true;
 				throw concurrencyException;
 			}
+
+            var isConflict = metadata.Value<bool>(Constants.RavenReplicationConflict);
+            if (isQuery && isConflict)
+            {
+                // this fix applies only to the Query API and to 2.5 servers since
+                // in v2.5 servers we index the original conflicted document
+                var documentId = metadata.Value<string>("@id");
+                var realDocumentId = documentId.Substring(0, documentId.IndexOf("/conflicts/", StringComparison.InvariantCulture));
+                Get(realDocumentId);
+                return true;
+            }
 
 			if (metadata.Value<bool>(Constants.RavenReplicationConflict) && onConflictedQueryResult != null)
 				throw onConflictedQueryResult(metadata.Value<string>("@id"));
@@ -1352,13 +1386,26 @@ namespace Raven.Client.Embedded
 					var multiLoadResult = Get(conflictIds, null);
 
 					var results = multiLoadResult.Results.Select(SerializationHelper.ToJsonDocument).ToArray();
+                    if (results.Any(x => x == null))
+                    {
+                        // one of the conflict documents doesn't exist, means that it was already resolved.
+                        // we'll reload the relevant documents again
+                        return true;
+                    }
 
 					foreach (var conflictListener in conflictListeners)
 					{
 						JsonDocument resolvedDocument;
 						if (conflictListener.TryResolveConflict(key, results, out resolvedDocument))
 						{
-							Put(key, etag, resolvedDocument.DataAsJson, resolvedDocument.Metadata);
+                            try
+                            {
+                                Put(key, etag, resolvedDocument.DataAsJson, resolvedDocument.Metadata);
+                            }
+                            catch (ConcurrencyException)
+                            {
+                                // we are racing the changes API here, so that is fine
+                            }
 
 							return true;
 						}
