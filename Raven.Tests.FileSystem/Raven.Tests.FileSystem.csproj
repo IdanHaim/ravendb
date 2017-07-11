@@ -120,6 +120,7 @@
     <Compile Include="Bugs\UploadFilesWithTheSameContentConcurrently.cs" />
     <Compile Include="Bugs\UploadDownload.cs" />
     <Compile Include="Bundles\Versioning\RavenDB_3295.cs" />
+    <Compile Include="Bundles\Versioning\RavenD_6879.cs" />
     <Compile Include="Bundles\Versioning\VersioningAndSynchronization.cs" />
     <Compile Include="Bundles\Versioning\VersioningTests.cs" />
     <Compile Include="ClientApi\FileQueryTests.cs" />
@@ -150,6 +151,7 @@
     <Compile Include="Issues\RavenDB_4189.cs" />
     <Compile Include="Issues\RavenDB_4690.cs" />
     <Compile Include="Issues\RavenDB_4961.cs" />
+    <Compile Include="Issues\RavenDB_7412.cs" />
     <Compile Include="Issues\RavenDB_FEI_2.cs" />
     <Compile Include="Issues\RavenDB_3648.cs" />
     <Compile Include="Issues\RavenDB_2889.cs" />
