@@ -375,6 +375,12 @@ namespace Raven.Database.Prefetching
                         if (log.IsDebugEnabled)
                             log.Debug("Didn't load any documents from previous batches. Loading documents directly from disk.");
 
+                        if (firstEtagInQueue != null && nextEtagToIndex.CompareTo(firstEtagInQueue) > 0)
+                        {
+                            // next etag to index isn't in the queue and bigger than the first etag in queue
+                            firstEtagInQueue = null;
+                        }
+
                         //if there has been no results, AND no future batch that we can wait for, then we just load directly from disk
                         LoadDocumentsFromDisk(etag, firstEtagInQueue); // here we _intentionally_ use the current etag, not the next one
                     }
@@ -1074,7 +1080,7 @@ namespace Raven.Database.Prefetching
             var sp = Stopwatch.StartNew();
             context.AddFutureBatch(futureBatchStat);
 
-            var docsCountRef = new Reference<int?>() {Value = docsCount};
+            var docsCountRef = new Reference<int?> {Value = docsCount};
             var cts = new CancellationTokenSource();
             var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, context.CancellationToken);
             var futureIndexBatch = new FutureIndexBatch
@@ -1086,29 +1092,23 @@ namespace Raven.Database.Prefetching
                 DocsCount = docsCountRef,
                 Task = Task.Run(() =>
                 {
-                    List<JsonDocument> jsonDocuments = null;
-                    int localWork = 0;
+                    linkedToken.Token.ThrowIfCancellationRequested();
+
                     var earlyExit = new Reference<bool>();
-                    while (context.RunIndexing)
-                    {
-                        linkedToken.Token.ThrowIfCancellationRequested();
-                        jsonDocuments = GetJsonDocsFromDisk(
-                            linkedToken.Token,
-                            Abstractions.Util.EtagUtil.Increment(nextEtag, -1), untilEtag, earlyExit);
-
-                        if (jsonDocuments.Count > 0)
-                            break;
-
-                        futureBatchStat.Retries++;
-
-                        context.WaitForWork(TimeSpan.FromMinutes(10), ref localWork, "PreFetching");
-                    }
+                    var jsonDocuments = GetJsonDocsFromDisk(
+                        linkedToken.Token,
+                        Abstractions.Util.EtagUtil.Increment(nextEtag, -1), untilEtag, earlyExit);
 
                     futureBatchStat.Duration = sp.Elapsed;
-                    futureBatchStat.Size = jsonDocuments == null ? 0 : jsonDocuments.Count;
+                    futureBatchStat.Size = jsonDocuments.Count;
 
-                    if (jsonDocuments == null)
-                        return null;
+                    if (jsonDocuments.Count == 0)
+                    {
+                        if (log.IsDebugEnabled)
+                            log.Debug("No documents to fetch for a future batch starting from etag {0}", nextEtag);
+
+                        return new List<JsonDocument>();
+                    }
 
                     LogEarlyExit(nextEtag, untilEtag, batchType == FutureBatchType.EarlyExit, 
                         jsonDocuments, sp.ElapsedMilliseconds);
